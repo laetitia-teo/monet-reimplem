@@ -162,14 +162,14 @@ class SpatialBroadcastDecoder(torch.nn.Module):
         self.grid = torch.stack([x, y], 0).unsqueeze(0)
 
     def to(self, device):
-        super().to(device)
-        self.grid.to(device)
+        self.grid = self.grid.to(device)
+        return super().to(device)
 
     def forward(self, z):
         z = z.unsqueeze(-1).unsqueeze(-1)
         shape = (z.shape[0], z.shape[1], self.S, self.S)
         zcast = z * torch.ones(shape).to(z.device)
-        grid = torch.ones((z.shape[0], 1, 1, 1)) * self.grid
+        grid = torch.ones((z.shape[0], 1, 1, 1)).to(z.device) * self.grid
         fmap = torch.cat([zcast, grid], 1)
         return self.net(fmap)
 
@@ -187,8 +187,8 @@ class ComponentVAE(torch.nn.Module):
         sigmas = self.softplus(params[:, self.zdim:])
         N = mus.shape[0]
         eps = torch.normal(
-            torch.zeros((N, self.zdim)),
-            torch.ones((N, self.zdim)))
+            torch.zeros((N, self.zdim), device=img.device),
+            torch.ones((N, self.zdim), device=img.device))
         z = mus + sigmas * eps
         pred_img = self.decoder(z)
         return pred_img, mus, sigmas # params are for internal part of loss
@@ -205,6 +205,10 @@ class MONet(torch.nn.Module):
         self.cvae = ComponentVAE(self.zdim)
         self.an = AttentionNet()
 
+    def to(self, device):
+        self.cvae.decoder.to(device) # for the grid
+        return super().to(device)
+
     def forward(self, img):
         bsize = img.shape[0]
         N = img.shape[0] * img.shape[2] * img.shape[3]
@@ -215,19 +219,21 @@ class MONet(torch.nn.Module):
         sk = torch.zeros((bsize, 1, 64, 64), device=img.device)
         L = 0. # loss is computed inside forward loop
         for k in range(self.K):
+            print(f'k = {k}')
             mk, sk = self.an(img, sk) # keep mk in log units ?
-            mask_list.append(mk)
             imgk, muk, sigmak = self.cvae(torch.cat([img, mk], 1))
-            img_list.append(imgk)
-            param_list.append((muk, sigmak))
+            mask_list.append(mk.detach())
+            img_list.append(imgk.detach())
+            param_list.append((muk.detach(), sigmak.detach()))
             # add loss components
             L1 = torch.sum(torch.exp(mk) * (img - imgk[:, :3, ...])**2 / N)
+            # print(torch.exp(mk))
             print(f'L1 = {L1}')
             L2 = torch.sum((mk - imgk[:, 3:, ...])**2 / N)
             print(f'L2 = {L2}')
             L3 = - torch.sum(torch.log(sigmak) - sigmak**2 - muk**2) / M
             print(f'L3 = {L3}')
-            L = L + self.gamma * L2 + self.beta * L3
+            L += L1 + self.gamma * L2 + self.beta * L3
         return L, mask_list, img_list, param_list
 
 # testing stuff

@@ -20,8 +20,12 @@ tf_records_path = 'data/multi_dsprites_multi_dsprites_colored_on_colored.tfrecor
 dataset = multi_dsprites.dataset(tf_records_path, 'colored_on_colored')
 batched_dataset = dataset.batch(BATCH_SIZE)
 
-t1 = time.time()
-for data in batched_dataset:
-    img = data['image']
-    t = torch.Tensor(img.numpy())
-    t1 = time.time()
+def to_tensor(data):
+    # for converting the output of the tf image data into a torch Tensor
+    return torch.Tensor(data['image'].numpy()).permute(0, 3, 1, 2) / 255
+
+if __name__ == '__main__':
+    for data in batched_dataset:
+        img = data['image']
+        t = torch.Tensor(img.numpy())
+        t1 = time.time()
