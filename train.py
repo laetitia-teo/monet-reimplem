@@ -11,6 +11,7 @@ NRUN = 1
 MODEL_SAVE_PATH = f'saves/run{NRUN}'
 BETA = 0.5
 GAMMA = 0.5
+K = 5
 
 if torch.cuda.is_available():
     device = torch.device('cuda:0')
@@ -46,14 +47,14 @@ data = next(iter(batched_dataset))
 imgs = to_tensor(data)
 
 def test_model(N, ep):
-    m = load_model(MONet(7), MODEL_SAVE_PATH + f'/epoch{ep}.pt')
+    m = load_model(MONet(K), MODEL_SAVE_PATH + f'/epoch{ep}.pt')
     reco, img_recs, masks = m.reconstruction(imgs)
     for i in range(N):
         fig, axs = plt.subplots(1, 2)
         axs[0].imshow(imgs[i].permute(1, 2, 0))
         axs[1].imshow(reco[i].permute(1, 2, 0))
-        fig2, axs2 = plt.subplots(2, 7)
-        for j in range(7):
+        fig2, axs2 = plt.subplots(2, K)
+        for j in range(K):
             axs2[0, j].matshow(masks[i, j, 0])
             axs2[1, j].imshow(img_recs[i, j].permute(1, 2, 0))
         plt.axis('off')
@@ -61,7 +62,7 @@ def test_model(N, ep):
 
 if __name__ == '__main__':
     Path(MODEL_SAVE_PATH).mkdir(parents=True, exist_ok=True)
-    model = MONet(7).to(device)
+    model = MONet(K).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     llist = train(10, model, opt, batched_dataset, to_tensor, device)
     plt.plot(llist)

@@ -11,103 +11,77 @@ import torch.nn.functional as F
 # use F.interpolate in unet
 
 
-class BlockDown_D(torch.nn.Module):
+class UBlock(torch.nn.Module):
     # with downsampling
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, scale_factor=1.):
         super().__init__()
         self.conv = torch.nn.Conv2d(in_ch, out_ch, 3, padding=1)
         self.norm = torch.nn.InstanceNorm2d(out_ch, affine=True)
         self.relu = torch.nn.ReLU()
-        self.downsample = torch.nn.MaxPool2d(2, 2)
+        self.scale_factor = scale_factor
 
     def forward(self, fmap):
-        skip = self.relu(self.norm(self.conv(fmap)))
-        fmap = self.downsample(skip)
-        return skip, fmap
-
-class BlockDown_ND(torch.nn.Module):
-    # no downsampling
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.conv = torch.nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.norm = torch.nn.InstanceNorm2d(out_ch, affine=True)
-        self.relu = torch.nn.ReLU()
-
-    def forward(self, fmap):
-        skip = self.relu(self.norm(self.conv(fmap)))
-        return skip
-
-class BlockUp_U(torch.nn.Module):
-    # with upsampling
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.conv = torch.nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.norm = torch.nn.InstanceNorm2d(out_ch, affine=True)
-        self.relu = torch.nn.ReLU()
-        self.upsample = torch.nn.UpsamplingNearest2d(scale_factor=2)
-
-    def forward(self, fmap):
-        return self.upsample(self.relu(self.norm(self.conv(fmap))))
-
-class BlockUp_NU(torch.nn.Module):
-    def __init__(self, in_ch, out_ch):
-        # no upsampling
-        super().__init__()
-        self.conv = torch.nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.norm = torch.nn.InstanceNorm2d(out_ch, affine=True)
-        self.relu = torch.nn.ReLU()
-
-    def forward(self, fmap):
-        return self.relu(self.norm(self.conv(fmap)))
+        if self.scale_factor < 1.:
+            # block for the downsampling path
+            skip = self.relu(self.norm(self.conv(fmap)))
+            fmap = F.interpolate(
+                skip,
+                scale_factor=self.scale_factor,
+                mode='bilinear')
+            return skip, fmap
+        elif self.scale_factor > 1.:
+            # block for the upsampling path
+            fmap = F.interpolate(
+                fmap,
+                scale_factor=self.scale_factor,
+                mode='bilinear')
+            return self.relu(self.norm(self.conv(fmap))), None
+        else:
+            # no up- or downsampling
+            fmap = self.relu(self.norm(self.conv(fmap)))
+            return fmap, fmap
 
 class AttentionNet(torch.nn.Module):
     def __init__(self):
         super().__init__()
         ch_list = [
-            (4, 8),
-            (8, 16),
-            (16, 32),
+            (4, 32),
             (32, 32),
-            (32, 32)]
+            (32, 64),
+            (64, 64),
+            (64, 128)]
         # downsampling blocks
-        self.blockd0 = BlockDown_D(*ch_list[0])
-        self.blockd1 = BlockDown_D(*ch_list[1])
-        self.blockd2 = BlockDown_D(*ch_list[2])
-        self.blockd3 = BlockDown_D(*ch_list[3])
-        self.blockd4 = BlockDown_ND(*ch_list[4])
-        # upsampling blocks (reverse order)
-        self.blocku4 = BlockUp_U(*ch_list[4][::-1])
-        self.blocku3 = BlockUp_U(*ch_list[3][::-1])
-        self.blocku2 = BlockUp_U(*ch_list[2][::-1])
-        self.blocku1 = BlockUp_U(*ch_list[1][::-1])
-        self.blocku0 = BlockUp_NU(*ch_list[0][::-1])
-        # middle mlp
-        self.flatten = torch.nn.Flatten()
-        self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(128, 128),
+        self.down = torch.nn.ModuleList()
+        self.up = torch.nn.ModuleList()
+        n = len(ch_list)
+        for i in range(len(ch_list)):
+            if i < n - 1:
+                self.down.append(UBlock(*ch_list[i], scale_factor=.5))
+                self.up.append(
+                    UBlock(*ch_list[::-1][i][::-1], scale_factor=2.))
+            else:
+                self.down.append(UBlock(*ch_list[i]))
+                self.up.append(UBlock(*ch_list[::-1][i][::-1]))
+        self.mid = torch.nn.Sequential(
+            torch.nn.Conv2d(128, 256, 1),
             torch.nn.ReLU(),
-            torch.nn.Linear(128, 128),
+            torch.nn.Conv2d(256, 256, 1),
             torch.nn.ReLU(),
-            torch.nn.Linear(128, 128),
+            torch.nn.Conv2d(256, 128, 1),
         )
         # last layer
         self.logsigmoid = torch.nn.LogSigmoid()
         self.outconv = torch.nn.Conv2d(4, 1, 1)
 
     def forward(self, img, scope):
-        img = torch.cat([img, scope], 1)
-        skip0, fmap = self.blockd0(img)
-        skip1, fmap = self.blockd1(fmap)
-        skip2, fmap = self.blockd2(fmap)
-        skip3, fmap = self.blockd3(fmap)
-        skip4 = self.blockd4(fmap)
-        vec = self.flatten(skip4)
-        fmap = torch.reshape(vec, skip4.shape)
-        fmap = self.blocku4(fmap + skip4)
-        fmap = self.blocku3(fmap + skip3)
-        fmap = self.blocku2(fmap + skip2)
-        fmap = self.blocku1(fmap + skip1)
-        fmap = self.blocku0(fmap + skip0)
+        fmap = torch.cat([img, scope], 1)
+        skips = []
+        for i, downblock in enumerate(self.down):
+            skip, fmap = downblock(fmap)
+            skips.append(skip)
+        fmap = self.mid(fmap)
+        for i, upblock in enumerate(self.up):
+            fmap, _ = upblock(fmap + skips[::-1][i])
         fmap = self.outconv(fmap)
         alpha = self.logsigmoid(fmap)
         one_minus_alpha = self.logsigmoid(-fmap)
@@ -254,6 +228,7 @@ class MONet(torch.nn.Module):
         log_masks = torch.stack(log_masks, 1)
         # masks should already sum to 1
         # masks = torch.softmax(log_masks, 1)
+        masks = torch.clamp_min(log_masks.exp(), min=1e-9)
         log_rmask = F.log_softmax(log_mask_recs, 1)
         mask_loss = F.kl_div(log_mask_recs, masks, reduction='batchmean')
 
