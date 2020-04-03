@@ -14,7 +14,7 @@ import tensorflow as tf
 from multi_object_datasets import multi_dsprites
 
 tf.enable_eager_execution()
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 
 tf_records_path = 'data/multi_dsprites_multi_dsprites_colored_on_colored.tfrecords'
 dataset = multi_dsprites.dataset(tf_records_path, 'colored_on_colored')
@@ -27,5 +27,5 @@ def to_tensor(data):
 if __name__ == '__main__':
     for data in batched_dataset:
         img = data['image']
-        t = torch.Tensor(img.numpy())
+        t = torch.Tensor(img.numpy()) / 255
         t1 = time.time()
